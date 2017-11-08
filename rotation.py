@@ -5,16 +5,18 @@ from mpl_toolkits.mplot3d import Axes3D
 
 plt.close("all")
 palette = colors.LinearSegmentedColormap.from_list("new", 
-        [[1,.1,0],[0,1, 0]], N=6)
+        [[1,0,0],[0,1, 0],[0,0,1]], N=10)
 
 rng = np.random.RandomState()
 
-def dynamics(M, stime = 1000, h=0.3):
+def dynamics(M, stime=2000, h=0.3, init=None):
+    if init is None:
+        init = np.random.randn(3)
     n = M.shape[0]
     x = np.zeros([stime, n])
     o = np.zeros([stime, n])
     x[0] = np.zeros(n)
-    x[0,:3] = np.ones(3)
+    x[0,:3] = init
     o[0] = x[0].copy()
     for t in range(1,stime):
         x[t] = x[t-1] + h*(-x[t-1] + np.dot(M, o[t-1]))
@@ -57,11 +59,13 @@ ax = fig.add_subplot(111, projection='3d')
 ax.scatter([1],[1],[1], s=50, c="blue")
 ax.scatter([0],[0],[0], s=200, c="green")
 
-for t,alpha in enumerate(np.linspace(0.0, 1.0, 6)):
+init = np.ones(3)
+
+for t,alpha in enumerate(np.linspace(0.4, 1.0, 10)):
     m = Ms*alpha + Ma*(1 - alpha)
     m = esp(m, h=0.08)
-    x = dynamics(m, h=0.08)
-    ax.plot(*x[:,:3].T, color=palette(t))
+    x = dynamics(m, h=0.08, init=init)
+    ax.plot(*x[:,:3].T,  color=palette(t))
     ax.set_xlim([-.6, 1.6])
     ax.set_ylim([-.6, 1.6])
     ax.set_zlim([-.6, 1.6])

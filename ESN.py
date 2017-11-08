@@ -37,20 +37,23 @@ class EchoStateRNNCell(rnn_cell_impl.RNNCell):
 
     """
 
-    def __init__(self, num_units, num_inputs=1, decay=0.1, epsilon=1e-10, alpha=0.4, 
-                 sparseness=0.0, rng=None, activation=None, optimize=False, 
+    def __init__(self, num_units, num_inputs=1, num_readouts=1, decay=0.1, epsilon=1e-10, alpha=0.4, 
+                 sparseness=0.0, rng=None, batch=True, activation=None, saturation=None, 
                  optimize_vars=None, reuse=None):
         """
         Args:
             num_units: int, The number of units in the RNN cell.
             num_inputs: int, The number of input units to the RNN cell.
+            num_readouts: int, The number of readout units of the RNN cell.
             decay: float, Decay of the ODE of each unit. Default: 0.1.
             epsilon: float, Discount from spectral radius 1. Default: 1e-10.
             alpha: float [0,1], the proporsion of infinitesimal expansion vs infinitesimal rotation
                 of the dynamical system defined by the inner weights
             sparseness: float [0,1], sparseness of the inner weight matrix. Default: 0.
             rng: np.random.RandomState, random number generator. Default: None.
-            activation: Nonlinearity to use.  Default: `tanh`.
+            batch: if the readout activation are computed after the simulation. (Cannot have feedback). Default: True.
+            activation: Nonlinearity to use for the output.  Default: `tanh`.
+            activation: Nonlinearity to use for the neural step.  Default: `tanh`.
             optimize: Python boolean describing whether to optimize rho and alpha. 
             optimize_vars: list containing variables to be optimized
             reuse: (optional) Python boolean describing whether to reuse 
@@ -63,12 +66,15 @@ class EchoStateRNNCell(rnn_cell_impl.RNNCell):
         super(EchoStateRNNCell, self).__init__()
         self._num_units = num_units
         self._activation = activation or math_ops.tanh
+        self.saturation = saturation or math_ops.tanh
         self._reuse = reuse
         self.num_inputs = num_inputs
+        self.num_readouts = num_readouts
         self.epsilon = epsilon
         self.sparseness = sparseness
-        self.optimize = optimize
+        self.batch = batch
         
+                
         # Random number generator initialization
         self.rng = rng
         if rng is None:
@@ -76,20 +82,33 @@ class EchoStateRNNCell(rnn_cell_impl.RNNCell):
         
         # build initializers for tensorflow variables 
         self.w = self.buildInputWeights()
+        self.wout = self.buildOutputWeights()
+        self.wfb = self.buildfbWeights()
         self.u = self.buildEchoStateWeights()
         
         self.W = tf.get_variable('W',initializer = self.w, trainable = False)   
         self.U = tf.get_variable('U', initializer = self.u, trainable = False)
+        self.Wfb = tf.get_variable('Wfb',initializer = self.w, trainable = False)   
+        self.Wout = tf.get_variable('Wout',initializer = self.wout, trainable = False)   
+       
+        self.state = tf.get_variable('state', initializer = 
+                                     tf.zeros([1,self._num_units], dtype=tf.float32 ), trainable = False)  
+        self.output = tf.get_variable('output', initializer = 
+                                      tf.zeros([1, self._num_units], dtype=tf.float32 ), trainable = False) 
+     
+        self.readouts = tf.get_variable('readouts',initializer = 
+                                        tf.zeros([1, self._num_units], dtype=tf.float32 ), trainable = False)  
 
         # alpha and rho default as tf non trainables  
         self.optimize_table = {"alpha": False, 
                                "rho": False, 
-                               "decay": False}
+                               "decay": False,
+                               "sw": False}
         
-        if self.optimize == True:
-            # Set tf trainables  
+        # Set tf trainables  
+        if optimize_vars is not None:
             for var in ["alpha", "rho", "decay", "sw" ]:
-                if var in optimize_vars or optimize_vars is None:
+                if var in optimize_vars:
                     self.optimize_table[var] = True
                 
         self.decay = tf.get_variable('decay', initializer = decay, 
@@ -98,8 +117,12 @@ class EchoStateRNNCell(rnn_cell_impl.RNNCell):
                                      trainable = self.optimize_table["alpha"])
         self.rho = tf.get_variable('Rho', initializer = 0.5 if self.optimize_table["rho"] 
                                    else 1 - self.epsilon, trainable = self.optimize_table["rho"]) 
-        self.sw = tf.get_variable('sw', initializer = 1.0 if self.optimize_table["sw"] 
-                                   else 1 - self.epsilon, trainable = self.optimize_table["sw"])     
+        self.sw = tf.get_variable('sw', initializer = 4.0 if self.optimize_table["sw"] 
+                                   else 1 - self.epsilon, trainable = self.optimize_table["sw"])   
+        
+        self.init()
+    
+    def init(self):
         self.setEchoStateProperty()
  
     @property
@@ -110,26 +133,40 @@ class EchoStateRNNCell(rnn_cell_impl.RNNCell):
     def output_size(self):
         return self._num_units
 
-    def call(self, inputs, state):
-        """ Echo-state RNN: 
-            x = x + h*(f(W*inp + U*g(x)) - x). 
-        """
+    def call(self, inputs, state, readouts = None):
+        """ Echo-state RNN: """
         
-        new_state = state + self.decay*(
-                self._activation(
-                    tf.matmul(inputs, self.W * self.sw) +
-                    tf.matmul(self._activation(state), self.U * self.rho_one * self.rho) 
-                )
-            - state)
+        if  not self.batch and readouts is not None:
+           # x = x + h*(f(W*inp + Wfb*rout + U*g(x)) - x). 
+           new_state = self.state + self.decay*(
+                    self.saturation(
+                        tf.matmul(inputs, self.W * self.sw) + 
+                        tf.matmul(readouts, self.Wfb) + 
+                        tf.matmul(self._activation(state), self.U * self.rho_one * self.rho) 
+                    )
+                - self.state)
+        else:
+           # x = x + h*(f(W*inp + U*g(x)) - x). 
+           new_state = self.state + self.decay*(
+                    self.saturation(
+                        tf.matmul(inputs, self.W * self.sw) + 
+                        tf.matmul(self._activation(state), self.U * self.rho_one * self.rho) 
+                    )
+                - self.state)       
+        self.output = self._activation(new_state)
+        self.readouts = tf.matmul(self.output , self.Wout) 
+
+        return self.output, new_state   
+    
+    def reset(self):
+        self.state = tf.zeros([1, self._num_units], dtype=tf.float32)
+        self.output = tf.zeros([1, self._num_units], dtype=tf.float32)
+        self.readouts = tf.zeros([1, self.num_readouts], dtype=tf.float32)
         
-
-        output = self._activation(new_state)
-
-        return output, new_state   
-         
+ 
     def setEchoStateProperty(self):
         """ optimize U to obtain alpha-imporooved echo-state property """
-
+        self.U.assign(self.u)
         self.U = self.set_alpha(self.U)
         self.U = self.normalizeEchoStateWeights(self.U)
         self.rho_one = self.buildEchoStateRho(self.U) 
@@ -144,11 +181,33 @@ class EchoStateRNNCell(rnn_cell_impl.RNNCell):
             Returns:
             
             A 1-D tensor representing the 
-            input weights to an ESN    
+            input weights to the ESN    
         """  
 
         # Input weight tensor initializer
         return self.rng.uniform(-1, 1, [self.num_inputs, self._num_units]).astype("float32") 
+    
+    def buildOutputWeights(self):
+        """            
+            Returns:
+            
+            A 1-D tensor representing the 
+            output weights from the ESN  to the readouts 
+        """  
+
+        # Input weight tensor initializer
+        return self.rng.uniform(-1, 1, [self._num_units, self.num_readouts]).astype("float32") 
+     
+    def buildfbWeights(self):
+        """            
+            Returns:
+            
+            A 1-D tensor representing the 
+            output weights from the  readouts to the ESN
+        """  
+
+        # Input weight tensor initializer
+        return self.rng.uniform(-1, 1, [self.num_readouts, self._num_units]).astype("float32")       
     
     def buildEchoStateWeights(self):
         """            

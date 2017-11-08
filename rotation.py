@@ -4,17 +4,45 @@ import matplotlib.colors as colors
 from mpl_toolkits.mplot3d import Axes3D
 
 plt.close("all")
-
-def dynamics(M, stime = 100, dt = 0.1):
-    n = M.shape[0]
-    x = np.zeros([stime, n])
-    x[0] = np.ones(n)
-    for t in range(1,stime):
-        x[t] = x[t-1] + dt*np.dot(M, x[t-1])
-    
-    return x
+palette = colors.LinearSegmentedColormap.from_list("new", 
+        [[1,.1,0],[0,1, 0]], N=6)
 
 rng = np.random.RandomState()
+
+def dynamics(M, stime = 1000, h=0.3):
+    n = M.shape[0]
+    x = np.zeros([stime, n])
+    o = np.zeros([stime, n])
+    x[0] = np.zeros(n)
+    x[0,:3] = np.ones(3)
+    o[0] = x[0].copy()
+    for t in range(1,stime):
+        x[t] = x[t-1] + h*(-x[t-1] + np.dot(M, o[t-1]))
+        o[t] = np.tanh(x[t])
+    return o
+
+def esp(m, h=0.1, epsilon=.001):
+
+    m = m/np.abs(np.linalg.eigvals(m)).max()
+    
+    e = np.linalg.eigvals(m)
+    rho = abs(e).max()
+    x = e.real
+    y = e.imag
+        
+    # solve quadratic equations
+    target = 1.0 - epsilon/2.0
+    a = x**2*h**2 + y**2*h**2
+    b = 2*x*h - 2*x*h**2
+    c = 1 + h**2 - 2*h - target**2
+    # just get the positive solutions
+    sol = (-b + np.sqrt(b**2 - 4*a*c))/(2*a)
+    # and take the minor amongst them
+    effective_rho = sol.min()
+        
+    m *= effective_rho
+    return m
+
 
 n = 3
 M = rng.randn(n, n)
@@ -24,15 +52,18 @@ Ms = (M + M.T)*0.5
 
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
-palette = colors.LinearSegmentedColormap.from_list("new", 
-        [[1,1,0],[1,0,0]], N=20)
 
 
-for t,alpha in enumerate(np.linspace(0, 1, 20)):
-    x = dynamics(Ma*alpha +Ms*(1-alpha))
-    ax.plot(*x.T, color=palette(t))
-    ax.set_xlim([-10, 10])
-    ax.set_ylim([-10, 10])
-    ax.set_zlim([-10, 10])
+ax.scatter([1],[1],[1], s=50, c="blue")
+ax.scatter([0],[0],[0], s=200, c="green")
+
+for t,alpha in enumerate(np.linspace(0.0, 1.0, 6)):
+    m = Ms*alpha + Ma*(1 - alpha)
+    m = esp(m, h=0.08)
+    x = dynamics(m, h=0.08)
+    ax.plot(*x[:,:3].T, color=palette(t))
+    ax.set_xlim([-.6, 1.6])
+    ax.set_ylim([-.6, 1.6])
+    ax.set_zlim([-.6, 1.6])
 plt.show()
-    
+
